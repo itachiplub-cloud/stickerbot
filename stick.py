@@ -358,10 +358,16 @@ async def start_cmd(client: Client, message: Message):
         return
     await message.reply_text(
         small_caps(
-            "👋 Welcome to Sticker Bot!\n\n"
-            "/sticker – create a sticker\n"
-            "/mypacks – view your pack\n"
-            "/setemoji <emoji> – set default emoji\n"
+            "🌟 **Sticker Maker Bot** 🌟\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "Welcome! I can turn your images into high-quality Telegram stickers.\n\n"
+            "🖼 **/sticker**\n"
+            "Create a sticker from any image.\n\n"
+            "📦 **/mypacks**\n"
+            "Manage and view your sticker packs.\n\n"
+            "😊 **/setemoji <emoji>**\n"
+            "Choose the default emoji for new stickers.\n\n"
+            "🚀 Just send me an image to begin!"
         )
     )
 
