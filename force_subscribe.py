@@ -41,7 +41,39 @@ SETUP
 That's it. Admins can now run /addchannel, /removechannel, /channels
 to manage the list live.
 
-FINDING CHAT IDs (new)
+/addchannel INPUT FORMATS (upgraded)
+-------------------------------------
+/addchannel now accepts three kinds of channel references, plus two
+optional flags, in any order after the reference:
+
+    /addchannel <@username | https://t.me/... link | numeric chat id> \
+                [--request] [--button="Custom Label"] [Optional Title]
+
+  • @username or bare username           -> public channel/group
+  • https://t.me/username                -> normalized to @username
+  • https://t.me/+HASH or /joinchat/HASH  -> private invite link; the bot
+    will attempt to JOIN that chat via the link to resolve its chat ID.
+    If the bot is already a member and can't re-join, use /getid inside
+    that chat (or /mychats) to grab its ID and pass that instead.
+  • numeric chat id (e.g. -1001234567890) -> used as-is, same as before
+
+  --request              Mark this channel as "Request to Join". The bot
+                          will generate an approval-required invite link
+                          instead of a direct-join one.
+  --button="Text"         Custom label for this channel's join button in
+                          the "must join" prompt. Falls back to
+                          "➡️ Join <title>" (or "🔒 Request to Join <title>"
+                          for --request channels) if omitted.
+
+Examples:
+    /addchannel @MyChannel
+    /addchannel https://t.me/+AbCdEf12345 --request My Private Group
+    /addchannel -1001234567890 --button="🎬 Join Movies"
+
+/removechannel now also matches by invite link, not just the exact
+stored ref, so you can paste back whatever you originally used to add it.
+
+FINDING CHAT IDs
 -----------------------
 You no longer need to hunt for chat IDs by hand:
 
@@ -64,9 +96,17 @@ checks still need the bot to be a member/admin of that chat.
 """
 
 import os
+import re
 from pyrogram import filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated
 from pyrogram.errors import UserNotParticipant
+
+# ------------------------------------------------------------------
+# Recognized https://t.me/... link shapes for /addchannel parsing.
+# ------------------------------------------------------------------
+_INVITE_LINK_RE = re.compile(r'(?:https?://)?t\.me/(?:\+|joinchat/)[A-Za-z0-9_-]+', re.IGNORECASE)
+_USERNAME_LINK_RE = re.compile(r'(?:https?://)?t\.me/([A-Za-z]\w{3,31})/?$', re.IGNORECASE)
+_BARE_USERNAME_RE = re.compile(r'^[A-Za-z]\w{3,31}$')
 
 
 class ForceSubscribe:
@@ -142,6 +182,37 @@ class ForceSubscribe:
             return int(ref)
         return ref
 
+    @staticmethod
+    def _classify_ref(raw: str):
+        """
+        Classify a raw admin-typed channel reference for /addchannel.
+        Returns (kind, value):
+          "username"     -> value is "@username"
+          "invite_link"  -> value is the raw https://t.me/+... or /joinchat/... link
+          "chat_id"      -> value is the numeric id string (e.g. "-1001234567890")
+        Returns (None, raw) if nothing recognizable matched.
+        """
+        raw = raw.strip()
+
+        if _INVITE_LINK_RE.search(raw):
+            return "invite_link", raw
+
+        m = _USERNAME_LINK_RE.match(raw)
+        if m:
+            return "username", f"@{m.group(1)}"
+
+        stripped = raw.lstrip("-")
+        if stripped.isdigit():
+            return "chat_id", raw
+
+        if raw.startswith("@") and _BARE_USERNAME_RE.match(raw[1:]):
+            return "username", raw
+
+        if _BARE_USERNAME_RE.match(raw):
+            return "username", f"@{raw}"
+
+        return None, raw
+
     def _channels(self):
         return list(self.col.find())
 
@@ -190,9 +261,17 @@ class ForceSubscribe:
         buttons = []
         for ch in not_joined:
             link = await self._get_invite_link(client, ch)
+            if not link:
+                continue
             title = ch.get("title") or ch["ref"]
-            if link:
-                buttons.append([InlineKeyboardButton(f"➡️ Join {title}", url=link)])
+            custom_text = ch.get("button_text")
+            if custom_text:
+                label = custom_text
+            elif ch.get("join_mode") == "request":
+                label = f"🔒 Request to Join {title}"
+            else:
+                label = f"➡️ Join {title}"
+            buttons.append([InlineKeyboardButton(label, url=link)])
         buttons.append([InlineKeyboardButton("✅ I've Joined", callback_data="fsub_recheck")])
 
         text = (
@@ -210,6 +289,31 @@ class ForceSubscribe:
 
         return False
 
+    async def _build_invite_link(self, client, chat, join_mode, prefer_public=True, fallback_link=None):
+        """
+        Central place that decides what kind of invite link to generate
+        for a resolved `chat` object, based on join_mode:
+          - "request" -> approval-required link (creates_join_request=True)
+          - otherwise -> public @username link if available, else a normal
+                         exported invite link
+        Used both when a channel is first added and whenever a cached
+        invite_link needs to be (re)generated.
+        """
+        if join_mode == "request":
+            try:
+                invite = await client.create_chat_invite_link(chat.id, creates_join_request=True)
+                return invite.invite_link
+            except Exception:
+                return fallback_link
+
+        if prefer_public and getattr(chat, "username", None):
+            return f"https://t.me/{chat.username}"
+
+        try:
+            return await client.export_chat_invite_link(chat.id)
+        except Exception:
+            return fallback_link
+
     async def _get_invite_link(self, client, ch):
         if ch.get("invite_link"):
             return ch["invite_link"]
@@ -217,12 +321,12 @@ class ForceSubscribe:
         client_ref = self._to_client_ref(ch["ref"])
         try:
             chat = await client.get_chat(client_ref)
-            if chat.username:
-                link = f"https://t.me/{chat.username}"
-            else:
-                link = await client.export_chat_invite_link(chat.id)
-            # cache it so we don't re-fetch every time
-            self.col.update_one({"ref": ch["ref"]}, {"$set": {"invite_link": link, "title": chat.title or ch["ref"]}})
+            link = await self._build_invite_link(client, chat, ch.get("join_mode", "direct"))
+            if link:
+                self.col.update_one(
+                    {"ref": ch["ref"]},
+                    {"$set": {"invite_link": link, "title": chat.title or ch["ref"]}}
+                )
             return link
         except Exception:
             return None
@@ -375,56 +479,134 @@ class ForceSubscribe:
 
         @self.app.on_message(filters.command("addchannel") & admin_filter)
         async def add_channel(client, message: Message):
-            args = message.text.split(maxsplit=2)
-            if len(args) < 2:
+            raw_args = message.text.split(maxsplit=1)
+            if len(raw_args) < 2:
                 await message.reply_text(
-                    "Usage: `/addchannel @username_or_chatid [Optional Title]`\n\n"
+                    "Usage: `/addchannel <@username | invite_link | chat_id> "
+                    "[--request] [--button=\"Text\"] [Optional Title]`\n\n"
+                    "Examples:\n"
+                    "`/addchannel @MyChannel`\n"
+                    "`/addchannel https://t.me/+AbCdEf12345 --request My Private Group`\n"
+                    "`/addchannel -1001234567890 --button=\"🎬 Join Movies\"`\n\n"
                     "⚠️ Make sure the bot is an **admin** in that channel/group first."
                 )
                 return
 
-            ref = args[1].strip()
-            title = args[2].strip() if len(args) > 2 else ref
+            remainder = raw_args[1].strip()
+
+            # --- extract optional flags (order-independent) ---
+            join_mode = "direct"
+            if re.search(r'(?:^|\s)--request(?:\s|$)', remainder):
+                join_mode = "request"
+                remainder = re.sub(r'(?:^|\s)--request(?:\s|$)', ' ', remainder).strip()
+
+            button_text = None
+            btn_match = re.search(r'--button=("([^"]+)"|(\S+))', remainder)
+            if btn_match:
+                button_text = btn_match.group(2) or btn_match.group(3)
+                remainder = (remainder[:btn_match.start()] + remainder[btn_match.end():]).strip()
+
+            parts = remainder.split(maxsplit=1)
+            if not parts or not parts[0]:
+                await message.reply_text("❌ Please provide a channel reference.")
+                return
+            ref_input = parts[0].strip()
+            title_override = parts[1].strip() if len(parts) > 1 else None
+
+            kind, normalized = self._classify_ref(ref_input)
+            if kind is None:
+                await message.reply_text(
+                    "❌ Invalid channel reference.\n\n"
+                    "Send a public @username, a https://t.me/... link (public "
+                    "or private invite), or a numeric chat ID."
+                )
+                return
+
+            # Early dedupe check for refs we already know (username/chat_id).
+            # Invite links can't be deduped until after we join and learn
+            # the real chat id, so those get a second check right before insert.
+            if kind != "invite_link" and self.col.find_one({"ref": normalized}):
+                await message.reply_text("That channel is already in the must-join list.")
+                return
+
+            resolved_title = title_override
+            invite_link = None
+            ref = normalized
+            warning_suffix = ""
+
+            if kind == "invite_link":
+                try:
+                    chat = await client.join_chat(normalized)
+                    ref = str(chat.id)
+                    resolved_title = resolved_title or chat.title
+                    invite_link = await self._build_invite_link(
+                        client, chat, join_mode, prefer_public=False, fallback_link=normalized
+                    )
+                except Exception as e:
+                    await message.reply_text(
+                        f"❌ Couldn't join via that invite link ({e}).\n\n"
+                        "If the bot is already a member of that chat, run `/getid` "
+                        "directly inside it (or `/mychats`) to get its chat ID, "
+                        "then use that ID with `/addchannel` instead."
+                    )
+                    return
+            else:
+                client_ref = self._to_client_ref(ref)
+                try:
+                    chat = await client.get_chat(client_ref)
+                    resolved_title = resolved_title or chat.title
+                    invite_link = await self._build_invite_link(client, chat, join_mode)
+                except Exception as e:
+                    resolved_title = resolved_title or ref_input
+                    warning_suffix = (
+                        f"\n\n⚠️ Couldn't fully verify this chat ({e}). Added anyway, "
+                        "but make sure the bot is an admin there or the join check "
+                        "will silently skip it."
+                    )
 
             if self.col.find_one({"ref": ref}):
                 await message.reply_text("That channel is already in the must-join list.")
                 return
 
-            invite_link = None
-            client_ref = self._to_client_ref(ref)
-            warning = ""
-            try:
-                chat = await client.get_chat(client_ref)
-                title = chat.title or title
-                if chat.username:
-                    invite_link = f"https://t.me/{chat.username}"
-                else:
-                    invite_link = await client.export_chat_invite_link(chat.id)
-            except Exception as e:
-                warning = (
-                    f"\n\n⚠️ Couldn't fully verify this chat ({e}). Added anyway, "
-                    "but make sure the bot is an admin there or the join check "
-                    "will silently skip it."
-                )
-
             self.col.insert_one({
-                "ref": ref, "title": title, "invite_link": invite_link,
-                "added_by": str(message.from_user.id)
+                "ref": ref,
+                "title": resolved_title or ref,
+                "invite_link": invite_link,
+                "link_type": kind,
+                "join_mode": join_mode,
+                "button_text": button_text,
+                "added_by": str(message.from_user.id),
             })
-            await message.reply_text(f"✅ Added **{title}** to the must-join list.{warning}")
+
+            mode_label = "🔒 Request-to-Join" if join_mode == "request" else "✅ Direct Join"
+            extra = f"\nButton text: {button_text}" if button_text else ""
+            await message.reply_text(
+                f"✅ Added **{resolved_title or ref}** to the must-join list.\n"
+                f"Mode: {mode_label}{extra}{warning_suffix}"
+            )
 
         @self.app.on_message(filters.command("removechannel") & admin_filter)
         async def remove_channel(client, message: Message):
             args = message.text.split(maxsplit=1)
             if len(args) < 2:
-                await message.reply_text("Usage: `/removechannel @username_or_chatid`")
+                await message.reply_text("Usage: `/removechannel @username_or_chatid_or_link`")
                 return
-            ref = args[1].strip()
-            result = self.col.delete_one({"ref": ref})
+            raw = args[1].strip()
+
+            result = self.col.delete_one({"ref": raw})
+            if not result.deleted_count:
+                kind, normalized = self._classify_ref(raw)
+                if kind and normalized != raw:
+                    result = self.col.delete_one({"ref": normalized})
+            if not result.deleted_count:
+                result = self.col.delete_one({"invite_link": raw})
+
             if result.deleted_count:
-                await message.reply_text(f"✅ Removed `{ref}` from the must-join list.")
+                await message.reply_text(f"✅ Removed `{raw}` from the must-join list.")
             else:
-                await message.reply_text("That channel isn't in the list.")
+                await message.reply_text(
+                    "That channel isn't in the list. Use /channels to see the current refs."
+                )
 
         @self.app.on_message(filters.command("channels") & admin_filter)
         async def list_channels_cmd(client, message: Message):
@@ -432,5 +614,14 @@ class ForceSubscribe:
             if not channels:
                 await message.reply_text("No must-join channels configured yet.")
                 return
-            lines = [f"• {c.get('title', c['ref'])} — `{c['ref']}`" for c in channels]
-            await message.reply_text("📋 **Must-join channels:**\n\n" + "\n".join(lines))
+
+            lines = []
+            for i, c in enumerate(channels, start=1):
+                mode_badge = "🔒 Request" if c.get("join_mode") == "request" else "✅ Direct"
+                btn = c.get("button_text")
+                btn_line = f"\n   Button: {btn}" if btn else ""
+                lines.append(
+                    f"{i}. **{c.get('title', c['ref'])}** — `{c['ref']}`\n"
+                    f"   Mode: {mode_badge}{btn_line}"
+                )
+            await message.reply_text("📋 **Must-join channels:**\n\n" + "\n\n".join(lines))
