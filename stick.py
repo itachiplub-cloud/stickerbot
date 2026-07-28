@@ -438,13 +438,13 @@ def normalize_sticker_png(image_bytes):
     print("[STICKER NORMALIZE] Upload started")
     return out.getvalue()
 
-async def _bot_api_upload(method, form_fields, file_field_name, file_bytes, file_name):
+async def _bot_api_upload(method, form_fields, file_field_name, file_bytes, file_name, content_type="image/png"):
     """Send a multipart/form-data request to the official Telegram Bot API."""
     url = f"{TELEGRAM_BOT_API_BASE}/{method}"
     form = aiohttp.FormData()
     for key, value in form_fields.items():
         form.add_field(key, str(value))
-    form.add_field(file_field_name, file_bytes, filename=file_name, content_type="image/png")
+    form.add_field(file_field_name, file_bytes, filename=file_name, content_type=content_type)
     async with aiohttp.ClientSession() as session:
         async with session.post(url, data=form) as resp:
             result = await resp.json()
@@ -509,6 +509,80 @@ async def add_sticker_to_pack(client, user_id, pack_name, sticker_bytes, emoji):
         return True, None
     except Exception as e:
         return False, str(e)
+
+async def create_video_sticker_pack(client, user_id, pack_name, title, sticker_bytes, emoji):
+    """Create a new video sticker set on Telegram"""
+    try:
+        username_suffix = f" • @{BOT_USERNAME}"
+        max_title_len = 64 - len(username_suffix)
+        if max_title_len < 1:
+            max_title_len = 30
+        visible_title = f"{title[:max_title_len]}{username_suffix}"
+
+        stickers_payload = json.dumps([{
+            "sticker": "attach://sticker_file",
+            "format": "video",
+            "emoji_list": [emoji]
+        }])
+        await _bot_api_upload(
+            "createNewStickerSet",
+            {
+                "user_id": user_id,
+                "name": pack_name,
+                "title": visible_title,
+                "stickers": stickers_payload
+            },
+            "sticker_file",
+            sticker_bytes,
+            "sticker.webm",
+            content_type="video/webm"
+        )
+        return True, f"https://t.me/addstickers/{pack_name}"
+    except Exception as e:
+        return False, str(e)
+
+async def add_video_sticker_to_pack(client, user_id, pack_name, sticker_bytes, emoji):
+    """Add a video sticker to an existing pack"""
+    try:
+        sticker_payload = json.dumps({
+            "sticker": "attach://sticker_file",
+            "format": "video",
+            "emoji_list": [emoji]
+        })
+        await _bot_api_upload(
+            "addStickerToSet",
+            {
+                "user_id": user_id,
+                "name": pack_name,
+                "sticker": sticker_payload
+            },
+            "sticker_file",
+            sticker_bytes,
+            "sticker.webm",
+            content_type="video/webm"
+        )
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+async def create_unique_video_sticker_pack(client, user_id, display_title, sticker_bytes, emoji):
+    """Create a video sticker pack, auto-retrying with a numeric suffix if the
+    generated Telegram short name is already occupied globally."""
+    base_name = generate_telegram_pack_name(display_title, BOT_USERNAME)
+    candidate = base_name
+    attempt = 0
+    last_error = None
+    while attempt <= MAX_PACK_NAME_RETRIES:
+        success, result = await create_video_sticker_pack(client, user_id, candidate, display_title, sticker_bytes, emoji)
+        if success:
+            return True, result, candidate
+        last_error = result
+        if _pack_name_taken(result):
+            attempt += 1
+            candidate = _suffixed_pack_name(base_name, attempt, BOT_USERNAME)
+            continue
+        return False, result, candidate
+    return False, last_error, candidate
 
 # ------------------------------------------------
 # FIX #2: UNIQUE TELEGRAM PACK NAME
@@ -588,6 +662,110 @@ def extract_pack_short_name(raw):
     if re.match(r'^[A-Za-z0-9_]+$', raw):
         return raw
     return None
+
+# ==============================================
+# NEW: /plain & /vid VIDEO STICKER HELPERS
+# ==============================================
+async def convert_mp4_to_sticker_webm(input_path, output_path):
+    """Convert MP4 to Telegram-compatible WEBM video sticker format.
+    Scales to 512x512, trims to 3 seconds, VP9 codec, no audio.
+    Returns (success, error_message_or_None)."""
+    vf = "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-t", str(MAX_PREVIEW_SECONDS),
+        "-vf", vf,
+        "-c:v", "libvpx",
+        "-b:v", "200k",
+        "-maxrate", "250k",
+        "-bufsize", "500k",
+        "-an",
+        "-deadline", "good",
+        "-cpu-used", "4",
+        "-auto-alt-ref", "0",
+        output_path
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(output_path):
+            err = stderr.decode(errors="ignore")[-500:] if stderr else "Unknown FFmpeg error"
+            return False, err
+        return True, None
+    except FileNotFoundError:
+        return False, "FFmpeg is not installed on the server."
+    except Exception as e:
+        return False, str(e)
+
+async def normalize_video_sticker(input_path, output_path):
+    """Normalize any video to Telegram sticker WEBM format (512x512, VP9, max 256KB, max 3s).
+    Returns (success, error_message_or_None)."""
+    vf = "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black"
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", input_path,
+        "-t", str(MAX_PREVIEW_SECONDS),
+        "-vf", vf,
+        "-c:v", "libvpx",
+        "-b:v", "200k",
+        "-maxrate", "250k",
+        "-bufsize", "500k",
+        "-an",
+        "-deadline", "good",
+        "-cpu-used", "4",
+        "-auto-alt-ref", "0",
+        output_path
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(output_path):
+            err = stderr.decode(errors="ignore")[-500:] if stderr else "Unknown FFmpeg error"
+            return False, err
+        file_size = os.path.getsize(output_path)
+        if file_size > 256 * 1024:
+            cmd_retry = [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-t", str(MAX_PREVIEW_SECONDS),
+                "-vf", vf,
+                "-c:v", "libvpx",
+                "-b:v", "120k",
+                "-maxrate", "150k",
+                "-bufsize", "300k",
+                "-an",
+                "-deadline", "good",
+                "-cpu-used", "4",
+                "-auto-alt-ref", "0",
+                output_path
+            ]
+            proc2 = await asyncio.create_subprocess_exec(
+                *cmd_retry,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc2.communicate()
+            if proc2.returncode != 0 or not os.path.exists(output_path):
+                return False, "Failed to compress video to under 256KB."
+        return True, None
+    except FileNotFoundError:
+        return False, "FFmpeg is not installed on the server."
+    except Exception as e:
+        return False, str(e)
+
+def prepare_plain_image_sticker(image_bytes):
+    """Prepare an image as a sticker without text overlay.
+    Returns normalized 512x512 PNG bytes."""
+    return normalize_sticker_png(image_bytes)
 
 # ==============================================
 # NEW: /vid PREVIEW VIDEO HELPERS
@@ -724,6 +902,13 @@ generated_commands = {}  # {message_id: command_string} — used by the "📋 Co
 # ==============================================
 vid_sessions = {}  # {user_id: {"step": str, "pack_index": int, "video_path": str, "preview_path": str, "text": str|None, "started_at": float}}
 
+# ==============================================
+# NEW: /plain STICKER WIZARD SESSION STORAGE
+# Kept completely separate from user_sessions, create_sessions, and
+# vid_sessions so it can never collide with any other flow.
+# ==============================================
+plain_sessions = {}  # {user_id: {"step": str, "pack_index": int|None, "display_title": str|None, "media_bytes": bytes|None, "media_type": str, "media_path": str|None, "emoji": str, "sticker_bytes": bytes|None, "started_at": float}}
+
 async def send_vid_message(client, chat_id, is_group, from_user, text, reply_markup=None):
     """Send a /vid-flow message from a callback context (where there is no
     incoming user Message to reply to directly)."""
@@ -841,6 +1026,26 @@ async def sticker_start(client: Client, message: Message):
 register_user_command("sticker", "Create a sticker from any image.", category=CATEGORY_STICKER)
 
 # ==============================================
+# NEW COMMAND: /plain - Works in DM and Groups
+# Creates stickers WITHOUT text overlay. Supports:
+# Photo, PNG, WEBP Sticker, Static Sticker, MP4 Video, WEBM Video Sticker.
+# ==============================================
+@app.on_message(filters.command("plain") & (filters.private | filters.group))
+async def plain_cmd(client: Client, message: Message):
+    if not await fsub.check(client, message):
+        return
+    uid = message.from_user.id
+    plain_sessions[uid] = {"step": "plain_waiting_destination", "started_at": time.time()}
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🆕 New Pack", callback_data="plaindest_new")],
+        [InlineKeyboardButton("📦 Existing Pack", callback_data="plaindest_existing")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="plaindest_cancel")]
+    ])
+    await reply_or_dm(client, message, small_caps("📦 Where do you want to save this sticker?"), reply_markup=kb)
+register_user_command("plain", "Create a sticker without text overlay.", category=CATEGORY_STICKER)
+
+# ==============================================
 # NEW COMMAND: /clonepack - Works in DM and Groups
 # ==============================================
 @app.on_message(filters.command("clonepack") & (filters.private | filters.group))
@@ -919,7 +1124,147 @@ async def handle_image(client: Client, message: Message):
         await proc.edit_text(small_caps(f"❌ Error: {str(e)}"))
 
 # ==============================================
-# NEW: STEP HANDLERS FOR MULTI-PACK TEXT INPUT
+# HANDLE PLAIN MEDIA - Works in DM and Groups
+# Handles photo, PNG, WEBP sticker, static sticker, MP4 video, WEBM
+# video sticker for the /plain flow.
+# ==============================================
+@app.on_message((filters.photo | filters.document | filters.sticker | filters.video) & (filters.private | filters.group), group=10)
+async def handle_plain_media(client: Client, message: Message):
+    if not message.from_user:
+        return
+    uid = message.from_user.id
+    if uid not in plain_sessions or plain_sessions[uid].get("step") != "plain_waiting_media":
+        return
+
+    session = plain_sessions[uid]
+    pack_index = session.get("pack_index")
+    if pack_index is None:
+        await reply_or_dm(client, message, small_caps("❌ Session expired. Start over with /plain."))
+        plain_sessions.pop(uid, None)
+        return
+
+    pack = get_pack_by_index(uid, pack_index)
+    existing_pack_type = pack.get("pack_type", "static") if pack else "static"
+
+    is_video_input = False
+    is_sticker_input = False
+    file_id = None
+    media_path = None
+
+    if message.sticker:
+        if message.sticker.is_animated:
+            await reply_or_dm(client, message, small_caps("❌ Animated stickers are not supported."))
+            return
+        if message.sticker.is_video:
+            is_video_input = True
+            file_id = message.sticker.file_id
+        else:
+            is_sticker_input = True
+            file_id = message.sticker.file_id
+    elif message.video:
+        is_video_input = True
+        file_id = message.video.file_id
+    elif message.photo:
+        file_id = message.photo.file_id
+    elif message.document and message.document.mime_type:
+        mime = message.document.mime_type.lower()
+        if mime.startswith("video/"):
+            is_video_input = True
+            file_id = message.document.file_id
+        elif mime.startswith("image/"):
+            file_id = message.document.file_id
+        else:
+            await reply_or_dm(client, message, small_caps("❌ Unsupported file type. Send a photo, PNG, WEBP sticker, static sticker, MP4 video, or WEBM video sticker."))
+            return
+    else:
+        await reply_or_dm(client, message, small_caps("❌ Unsupported media. Send a photo, PNG, WEBP sticker, static sticker, MP4 video, or WEBM video sticker."))
+        return
+
+    if existing_pack_type == "static" and is_video_input:
+        await reply_or_dm(client, message, small_caps("❌ This is a static sticker pack. Video stickers cannot be added. Use /plain with an image instead."))
+        return
+    if existing_pack_type == "video" and not is_video_input:
+        await reply_or_dm(client, message, small_caps("❌ This is a video sticker pack. Static stickers cannot be added. Use /plain with a video instead."))
+        return
+
+    proc = await reply_or_dm(client, message, small_caps("⚙️ Downloading and processing media..."))
+
+    try:
+        if is_video_input:
+            media_path = os.path.join(TEMP_DIR, f"plain_vid_{uid}_{uuid.uuid4().hex}.webm")
+            temp_input = os.path.join(TEMP_DIR, f"plain_vid_in_{uid}_{uuid.uuid4().hex}.mp4")
+            await client.download_media(message, file_name=temp_input)
+
+            file_name_lower = (getattr(message.video or message.document, "file_name", "") or "").lower()
+            mime_lower = (getattr(message.video or message.document, "mime_type", "") or "").lower()
+
+            if file_name_lower.endswith(".webm") or "webm" in mime_lower:
+                if message.sticker and message.sticker.is_video:
+                    duration = await probe_video_duration(temp_input)
+                    if duration and duration <= MAX_PREVIEW_SECONDS + DURATION_TOLERANCE:
+                        sticker_size = os.path.getsize(temp_input)
+                        if sticker_size <= 256 * 1024:
+                            os.rename(temp_input, media_path)
+                            session["media_path"] = media_path
+                            session["media_type"] = "video"
+                            session["step"] = "plain_waiting_emoji"
+                            cleanup_temp_files()
+                            await proc.edit_text(
+                                small_caps("😀 Send an emoji for this sticker."),
+                                reply_markup=InlineKeyboardMarkup([
+                                    [InlineKeyboardButton("😀 Default", callback_data="plainemoji_default"),
+                                     InlineKeyboardButton("✏️ Send Emoji", callback_data="plainemoji_send")]
+                                ])
+                            )
+                            return
+
+                ok, err = await normalize_video_sticker(temp_input, media_path)
+                cleanup_temp_files(temp_input)
+                if not ok:
+                    await proc.edit_text(small_caps(f"❌ Failed to process video: {err}"))
+                    return
+            else:
+                duration = await probe_video_duration(temp_input)
+                if duration is None:
+                    cleanup_temp_files(temp_input)
+                    await proc.edit_text(small_caps("❌ Invalid or unsupported video format."))
+                    return
+                if duration > MAX_PREVIEW_SECONDS + DURATION_TOLERANCE:
+                    cleanup_temp_files(temp_input)
+                    await proc.edit_text(small_caps(f"❌ Video is too long ({duration:.1f}s). Maximum allowed is 3 seconds."))
+                    return
+
+                ok, err = await normalize_video_sticker(temp_input, media_path)
+                cleanup_temp_files(temp_input)
+                if not ok:
+                    await proc.edit_text(small_caps(f"❌ Failed to convert video: {err}"))
+                    return
+
+            session["media_path"] = media_path
+            session["media_type"] = "video"
+        else:
+            img_file = await client.download_media(file_id, in_memory=True)
+            img_bytes = img_file.getvalue()
+            if is_sticker_input:
+                img_bytes = convert_webp_to_png(img_bytes)
+            sticker_bytes = prepare_plain_image_sticker(img_bytes)
+            session["media_bytes"] = sticker_bytes
+            session["media_type"] = "static"
+
+        session["step"] = "plain_waiting_emoji"
+        await proc.edit_text(
+            small_caps("😀 Send an emoji for this sticker."),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("😀 Default", callback_data="plainemoji_default"),
+                 InlineKeyboardButton("✏️ Send Emoji", callback_data="plainemoji_send")]
+            ])
+        )
+    except Exception as e:
+        cleanup_temp_files(
+            plain_sessions.get(uid, {}).get("media_path"),
+        )
+        await proc.edit_text(small_caps(f"❌ Error: {str(e)}"))
+        plain_sessions.pop(uid, None)
 # (called from handle_text below, not decorated themselves)
 # ==============================================
 async def handle_new_pack_name(client: Client, message: Message, uid):
@@ -1230,13 +1575,24 @@ async def handle_delpack_index(client: Client, message: Message, uid):
 # ==============================================
 @app.on_message(
     filters.text & (filters.private | filters.group) &
-    ~filters.command(["sticker", "setemoji", "mypacks", "stats", "users", "reset", "start", "addchannel", "removechannel", "channels", "clonepack", "renamepack", "delpack", "help", "adminhelp", "create", "cancel", "vid"]),
+    ~filters.command(["sticker", "setemoji", "mypacks", "stats", "users", "reset", "start", "addchannel", "removechannel", "channels", "clonepack", "renamepack", "delpack", "help", "adminhelp", "create", "cancel", "vid", "plain"]),
     group=6
 )
 async def handle_text(client: Client, message: Message):
     if not message.from_user:
         return
     uid = message.from_user.id
+
+    # Plain session text routing
+    if uid in plain_sessions:
+        step = plain_sessions[uid].get("step")
+        if step == "plain_waiting_pack_name":
+            await handle_plain_new_pack_name(client, message, uid)
+            return
+        if step in ("plain_waiting_emoji", "plain_waiting_emoji_text"):
+            await handle_plain_emoji_input(client, message, uid)
+            return
+
     if uid not in user_sessions:
         return
 
@@ -1287,6 +1643,94 @@ async def handle_text(client: Client, message: Message):
     if step == "delpack_waiting_index":
         await handle_delpack_index(client, message, uid)
         return
+
+# ==============================================
+# NEW: STEP HANDLERS FOR /plain FLOW
+# (called from handle_text above, not decorated themselves)
+# ==============================================
+async def handle_plain_new_pack_name(client: Client, message: Message, uid):
+    display_title = message.text.strip()
+    if not display_title:
+        await reply_or_dm(client, message, small_caps("❌ Please send a valid pack name."))
+        return
+
+    session = plain_sessions.get(uid)
+    if not session:
+        await reply_or_dm(client, message, small_caps("❌ Session expired. Start over with /plain."))
+        plain_sessions.pop(uid, None)
+        return
+
+    pack_index = get_next_pack_index(uid)
+    session["display_title"] = display_title
+    session["pack_index"] = pack_index
+    session["step"] = "plain_waiting_media"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel", callback_data="plainflow_cancel")]
+    ])
+    await reply_or_dm(
+        client, message,
+        small_caps(
+            "📸 Send me the media now.\n\n"
+            "Supported:\n"
+            "• Photo\n• PNG\n• WEBP Sticker\n• Static Sticker\n"
+            "• MP4 Video\n• WEBM Video Sticker"
+        ),
+        reply_markup=kb
+    )
+
+async def handle_plain_emoji_input(client: Client, message: Message, uid):
+    emoji = message.text.strip()
+    if not emoji:
+        await reply_or_dm(client, message, small_caps("❌ Please send a valid emoji."))
+        return
+
+    session = plain_sessions.get(uid)
+    if not session:
+        await reply_or_dm(client, message, small_caps("❌ Session expired. Start over with /plain."))
+        plain_sessions.pop(uid, None)
+        return
+
+    session["emoji"] = emoji
+    session["step"] = "plain_preview"
+    await send_plain_preview(client, message.chat.id, message.from_user, uid, is_group=message.chat.type != "private")
+
+# ==============================================
+# NEW: HELPER TO SEND /plain PREVIEW
+# ==============================================
+async def send_plain_preview(client, chat_id, from_user, uid, is_group=False):
+    """Generate and send the plain sticker preview with Add/Replace/Cancel buttons."""
+    session = plain_sessions.get(uid)
+    if not session:
+        return
+
+    media_type = session.get("media_type")
+    emoji = session.get("emoji", "😀")
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Add To Pack", callback_data="plainpreview_save"),
+         InlineKeyboardButton("🔄 Replace Media", callback_data="plainpreview_replace")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="plainpreview_cancel")]
+    ])
+
+    if is_group and from_user:
+        mention = f"[{from_user.first_name}](tg://user?id={from_user.id})"
+        caption = f"{mention}\n\n{small_caps(f'🎨 Preview ({emoji})')}"
+    else:
+        caption = small_caps(f"🎨 Preview ({emoji})")
+
+    if media_type == "static":
+        sticker_bytes = session.get("sticker_bytes")
+        if not sticker_bytes:
+            return
+        photo_file = BytesIO(sticker_bytes)
+        photo_file.name = "preview.png"
+        await client.send_photo(chat_id=chat_id, photo=photo_file, caption=caption, reply_markup=kb)
+    else:
+        media_path = session.get("media_path")
+        if not media_path or not os.path.exists(media_path):
+            return
+        await client.send_video(chat_id=chat_id, video=media_path, caption=caption, reply_markup=kb)
 
 # ==============================================
 # SIZE CALLBACK
@@ -1515,11 +1959,21 @@ async def mypacks_cmd(client: Client, message: Message):
 
     blocks = [small_caps("📦 Your Sticker Packs")]
     for pack in packs:
-        link = f"https://t.me/addstickers/{pack['telegram_pack_name']}"
+        telegram_name = pack.get("telegram_pack_name")
+        if telegram_name:
+            link_line = f"🔗 https://t.me/addstickers/{telegram_name}\n"
+        else:
+            link_line = small_caps("🔗 No Telegram Pack Yet") + "\n"
+        preview_line = ""
+        if pack.get("preview_video_url"):
+            preview_line = small_caps("🎬 Preview Available") + "\n"
+        else:
+            preview_line = small_caps("❌ No Preview") + "\n"
         blocks.append(
             small_caps(f"[{pack['pack_index']}] {pack['display_title']}") + "\n"
-            f"🔗 {link}\n"
-            + small_caps(f"🎨 Stickers: {pack.get('total_stickers', 0)}")
+            + link_line
+            + small_caps(f"🎨 Stickers: {pack.get('total_stickers', 0)}") + "\n"
+            + preview_line
         )
 
     await reply_or_dm(client, message, "\n\n".join(blocks))
@@ -1845,14 +2299,50 @@ async def vid_cmd(client: Client, message: Message):
     if not await fsub.check(client, message):
         return
     uid = message.from_user.id
-    packs = get_user_packs(uid)
+    vid_sessions[uid] = {"step": "vid_waiting_destination", "started_at": time.time()}
 
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🆕 New Pack", callback_data="viddest_new")],
+        [InlineKeyboardButton("📦 Existing Pack", callback_data="viddest_existing")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="viddest_cancel")]
+    ])
+    await reply_or_dm(client, message, small_caps("📦 Where do you want to save the preview video?"), reply_markup=kb)
+register_user_command("vid", "Add or replace a preview video for one of your sticker packs.", category=CATEGORY_STICKER)
+
+@app.on_callback_query(filters.regex(r"^viddest_"))
+async def vid_destination_callback(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in vid_sessions or vid_sessions[uid].get("step") != "vid_waiting_destination":
+        await callback.answer(small_caps("Session expired. Start over with /vid."), show_alert=True)
+        return
+
+    choice = callback.data.replace("viddest_", "")
+    await callback.answer()
+
+    if choice == "cancel":
+        vid_sessions.pop(uid, None)
+        await callback.message.edit_text(small_caps("❌ Cancelled."))
+        return
+
+    if choice == "new":
+        vid_sessions[uid]["step"] = "vid_waiting_pack_name"
+        await callback.message.edit_text(
+            small_caps("✏️ Enter the display name for your new sticker pack.\n\nExample:\nAnime Pack")
+        )
+        return
+
+    packs = get_user_packs(uid)
     if not packs:
-        await reply_or_dm(client, message, small_caps("❌ You have no sticker packs yet. Create one with /sticker."))
+        vid_sessions.pop(uid, None)
+        await callback.message.edit_text(small_caps("❌ You have no sticker packs yet. Create one with /sticker or /plain."))
         return
 
     if len(packs) == 1:
-        await start_vid_flow_for_pack(client, message, uid, packs[0]["pack_index"])
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await start_vid_flow_for_pack(client, callback.message, uid, packs[0]["pack_index"], from_user=callback.from_user)
         return
 
     rows, row = [], []
@@ -1864,13 +2354,11 @@ async def vid_cmd(client: Client, message: Message):
     if row:
         rows.append(row)
 
-    vid_sessions[uid] = {"step": "waiting_pack_selection", "started_at": time.time()}
-    await reply_or_dm(
-        client, message,
+    vid_sessions[uid]["step"] = "waiting_pack_selection"
+    await callback.message.edit_text(
         small_caps("📦 Select the sticker pack for the preview video:"),
         reply_markup=InlineKeyboardMarkup(rows)
     )
-register_user_command("vid", "Add or replace a preview video for one of your sticker packs.", category=CATEGORY_STICKER)
 
 @app.on_callback_query(filters.regex(r"^vidpack_"))
 async def vidpack_callback(client: Client, callback: CallbackQuery):
@@ -2034,6 +2522,27 @@ async def vid_text_input(client: Client, message: Message):
         return
 
     step = vid_sessions[uid].get("step")
+
+    if step == "vid_waiting_pack_name":
+        display_title = message.text.strip()
+        if not display_title:
+            await reply_or_dm(client, message, small_caps("❌ Please send a valid pack name."))
+            return
+        pack_index = get_next_pack_index(uid)
+        packs_collection.insert_one({
+            "user_id": str(uid),
+            "pack_index": pack_index,
+            "display_title": display_title,
+            "telegram_pack_name": None,
+            "emoji": DEFAULT_EMOJI,
+            "created_at": datetime.now(),
+            "total_stickers": 0
+        })
+        vid_sessions[uid]["pack_index"] = pack_index
+        proc = await reply_or_dm(client, message, small_caps(f"✅ Pack Created: {display_title}"))
+        await start_vid_flow_for_pack(client, message, uid, pack_index)
+        return
+
     if step not in ("waiting_vid_text", "editing_vid_text"):
         return
 
@@ -2136,6 +2645,289 @@ async def vidwatch_callback(client: Client, callback: CallbackQuery):
         )
     except Exception as e:
         await callback.message.reply_text(small_caps(f"❌ Failed to send preview: {str(e)}"))
+
+# ==============================================
+# NEW: /plain FLOW CALLBACKS
+# ==============================================
+
+@app.on_callback_query(filters.regex(r"^plaindest_"))
+async def plain_destination_callback(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in plain_sessions or plain_sessions[uid].get("step") != "plain_waiting_destination":
+        await callback.answer(small_caps("Session expired. Start over with /plain."), show_alert=True)
+        return
+
+    choice = callback.data.replace("plaindest_", "")
+    await callback.answer()
+
+    if choice == "cancel":
+        plain_sessions.pop(uid, None)
+        await callback.message.edit_text(small_caps("❌ Cancelled."))
+        return
+
+    if choice == "new":
+        plain_sessions[uid]["step"] = "plain_waiting_pack_name"
+        await callback.message.edit_text(
+            small_caps("✏️ Enter the display name for your new sticker pack.\n\nExample:\nAnime Pack")
+        )
+        return
+
+    packs = get_user_packs(uid)
+    if not packs:
+        plain_sessions.pop(uid, None)
+        await callback.message.edit_text(small_caps("❌ You have no sticker packs yet. Create one with /sticker or /plain."))
+        return
+
+    if len(packs) == 1:
+        pack = packs[0]
+        plain_sessions[uid]["pack_index"] = pack["pack_index"]
+        plain_sessions[uid]["display_title"] = pack["display_title"]
+        plain_sessions[uid]["step"] = "plain_waiting_media"
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        chat_id = callback.message.chat.id
+        is_group = callback.message.chat.type != "private"
+        text = small_caps(
+            "📸 Send me the media now.\n\n"
+            "Supported:\n"
+            "• Photo\n• PNG\n• WEBP Sticker\n• Static Sticker\n"
+            "• MP4 Video\n• WEBM Video Sticker"
+        )
+        if is_group:
+            mention = f"[{callback.from_user.first_name}](tg://user?id={callback.from_user.id})"
+            text = f"{mention}\n\n{text}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="plainflow_cancel")]
+        ])
+        await client.send_message(chat_id, text, reply_markup=kb)
+        return
+
+    rows, row = [], []
+    for pack in packs:
+        row.append(InlineKeyboardButton(f"[{pack['pack_index']}] {pack['display_title']}", callback_data=f"plainpack_{pack['pack_index']}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+
+    plain_sessions[uid]["step"] = "plain_waiting_pack_selection"
+    await callback.message.edit_text(
+        small_caps("📦 Select the sticker pack:"),
+        reply_markup=InlineKeyboardMarkup(rows)
+    )
+
+@app.on_callback_query(filters.regex(r"^plainpack_"))
+async def plain_pack_callback(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in plain_sessions or plain_sessions[uid].get("step") != "plain_waiting_pack_selection":
+        await callback.answer(small_caps("Session expired. Start over with /plain."), show_alert=True)
+        return
+
+    pack_index = int(callback.data.replace("plainpack_", ""))
+    pack = get_pack_by_index(uid, pack_index)
+    if not pack:
+        await callback.answer(small_caps("Invalid pack."), show_alert=True)
+        return
+
+    await callback.answer()
+    plain_sessions[uid]["pack_index"] = pack_index
+    plain_sessions[uid]["display_title"] = pack["display_title"]
+    plain_sessions[uid]["step"] = "plain_waiting_media"
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    chat_id = callback.message.chat.id
+    is_group = callback.message.chat.type != "private"
+    text = small_caps(
+        "📸 Send me the media now.\n\n"
+        "Supported:\n"
+        "• Photo\n• PNG\n• WEBP Sticker\n• Static Sticker\n"
+        "• MP4 Video\n• WEBM Video Sticker"
+    )
+    if is_group:
+        mention = f"[{callback.from_user.first_name}](tg://user?id={callback.from_user.id})"
+        text = f"{mention}\n\n{text}"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel", callback_data="plainflow_cancel")]
+    ])
+    await client.send_message(chat_id, text, reply_markup=kb)
+
+@app.on_callback_query(filters.regex(r"^plainflow_cancel$"))
+async def plain_flow_cancel_callback(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid in plain_sessions:
+        session = plain_sessions[uid]
+        cleanup_temp_files(session.get("media_path"))
+        plain_sessions.pop(uid, None)
+    await callback.answer()
+    await callback.message.edit_text(small_caps("❌ Cancelled."))
+
+@app.on_callback_query(filters.regex(r"^plainemoji_"))
+async def plain_emoji_callback(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in plain_sessions or plain_sessions[uid].get("step") != "plain_waiting_emoji":
+        await callback.answer(small_caps("Session expired. Start over with /plain."), show_alert=True)
+        return
+
+    choice = callback.data.replace("plainemoji_", "")
+    await callback.answer()
+
+    session = plain_sessions[uid]
+    if choice == "default":
+        session["emoji"] = "😀"
+    else:
+        session["step"] = "plain_waiting_emoji_text"
+        await callback.message.edit_text(small_caps("✏️ Send an emoji for this sticker."))
+        return
+
+    session["step"] = "plain_preview"
+    is_group = callback.message.chat.type != "private"
+    await send_plain_preview(client, callback.message.chat.id, callback.from_user, uid, is_group=is_group)
+
+@app.on_callback_query(filters.regex(r"^plainpreview_"))
+async def plain_preview_callback(client: Client, callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in plain_sessions or plain_sessions[uid].get("step") != "plain_preview":
+        await callback.answer(small_caps("Session expired. Start over with /plain."), show_alert=True)
+        return
+
+    choice = callback.data.replace("plainpreview_", "")
+    await callback.answer()
+    session = plain_sessions[uid]
+
+    if choice == "cancel":
+        cleanup_temp_files(session.get("media_path"))
+        plain_sessions.pop(uid, None)
+        await callback.message.edit_text(small_caps("❌ Cancelled."))
+        return
+
+    if choice == "replace":
+        session["step"] = "plain_waiting_media"
+        await callback.message.edit_text(
+            small_caps(
+                "📸 Send me the media now.\n\n"
+                "Supported:\n"
+                "• Photo\n• PNG\n• WEBP Sticker\n• Static Sticker\n"
+                "• MP4 Video\n• WEBM Video Sticker"
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Cancel", callback_data="plainflow_cancel")]
+            ])
+        )
+        return
+
+    if choice == "save":
+        pack_index = session.get("pack_index")
+        display_title = session.get("display_title")
+        emoji = session.get("emoji", "😀")
+        media_type = session.get("media_type")
+        pack = get_pack_by_index(uid, pack_index)
+
+        is_new_pack = pack is None
+        telegram_pack_name = pack.get("telegram_pack_name") if pack else None
+
+        proc = await callback.message.reply_text(small_caps("⚙️ Adding sticker to pack..."))
+
+        if media_type == "static":
+            sticker_bytes = session.get("sticker_bytes")
+            if not sticker_bytes:
+                cleanup_temp_files(session.get("media_path"))
+                plain_sessions.pop(uid, None)
+                await proc.edit_text(small_caps("❌ Session expired. Start over with /plain."))
+                return
+
+            if not telegram_pack_name:
+                pack_type = "static"
+                success, result, telegram_pack_name_new = await create_unique_sticker_pack(client, uid, display_title, sticker_bytes, emoji)
+                if not success:
+                    cleanup_temp_files(session.get("media_path"))
+                    plain_sessions.pop(uid, None)
+                    await proc.edit_text(small_caps(f"❌ Failed to create pack: {result}"))
+                    return
+                create_pack_record(uid, pack_index, display_title, telegram_pack_name_new, emoji)
+                packs_collection.update_one(
+                    {"user_id": str(uid), "pack_index": pack_index},
+                    {"$set": {"pack_type": pack_type}}
+                )
+                telegram_pack_name = telegram_pack_name_new
+            else:
+                if not is_new_pack and pack.get("pack_type", "static") != "static":
+                    cleanup_temp_files(session.get("media_path"))
+                    plain_sessions.pop(uid, None)
+                    await proc.edit_text(small_caps("❌ This is a video sticker pack. Static stickers cannot be added."))
+                    return
+                success, err = await add_sticker_to_pack(client, uid, telegram_pack_name, sticker_bytes, emoji)
+                if not success:
+                    cleanup_temp_files(session.get("media_path"))
+                    plain_sessions.pop(uid, None)
+                    await proc.edit_text(small_caps(f"❌ Failed to add sticker: {err}"))
+                    return
+        else:
+            media_path = session.get("media_path")
+            if not media_path or not os.path.exists(media_path):
+                plain_sessions.pop(uid, None)
+                await proc.edit_text(small_caps("❌ Session expired. Start over with /plain."))
+                return
+
+            if not telegram_pack_name:
+                pack_type = "video"
+                with open(media_path, "rb") as f:
+                    video_bytes = f.read()
+                success, result, telegram_pack_name_new = await create_unique_video_sticker_pack(client, uid, display_title, video_bytes, emoji)
+                if not success:
+                    cleanup_temp_files(media_path)
+                    plain_sessions.pop(uid, None)
+                    await proc.edit_text(small_caps(f"❌ Failed to create pack: {result}"))
+                    return
+                create_pack_record(uid, pack_index, display_title, telegram_pack_name_new, emoji)
+                packs_collection.update_one(
+                    {"user_id": str(uid), "pack_index": pack_index},
+                    {"$set": {"pack_type": pack_type}}
+                )
+                telegram_pack_name = telegram_pack_name_new
+            else:
+                if not is_new_pack and pack.get("pack_type", "static") != "video":
+                    cleanup_temp_files(media_path)
+                    plain_sessions.pop(uid, None)
+                    await proc.edit_text(small_caps("❌ This is a static sticker pack. Video stickers cannot be added."))
+                    return
+                with open(media_path, "rb") as f:
+                    video_bytes = f.read()
+                success, err = await add_video_sticker_to_pack(client, uid, telegram_pack_name, video_bytes, emoji)
+                if not success:
+                    cleanup_temp_files(media_path)
+                    plain_sessions.pop(uid, None)
+                    await proc.edit_text(small_caps(f"❌ Failed to add sticker: {err}"))
+                    return
+
+        if not is_new_pack:
+            increment_pack_sticker_count(uid, pack_index)
+        increment_sticker_count(uid)
+
+        updated_pack = get_pack_by_index(uid, pack_index)
+        total = updated_pack.get("total_stickers", 0) if updated_pack else 0
+
+        cleanup_temp_files(session.get("media_path"))
+        plain_sessions.pop(uid, None)
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌟 Open Sticker Pack", url=f"https://t.me/addstickers/{telegram_pack_name}")]
+        ])
+        await proc.edit_text(
+            small_caps(
+                f"✅ Sticker Added Successfully!\n\n"
+                f"📦 Pack: {display_title}\n"
+                f"🆔 Sticker Number: {total}\n"
+                f"🎉 Total Stickers: {total}"
+            ),
+            reply_markup=kb
+        )
 
 # ==============================================
 # NEW: /create WIZARD (BOT OWNER / SUDO ADMINS ONLY)
