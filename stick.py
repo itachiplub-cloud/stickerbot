@@ -2110,9 +2110,12 @@ def main():
 
     with app:
         me = app.get_me()
-        BOT_USERNAME = me.username
+        if not me or not me.username:
+            print("❌ Bot username is not set. Please set a username for your bot via @BotFather and restart.")
+            sys.exit(1)
+        BOT_USERNAME = me.username.lower()
 
-        print(small_caps(f"📊 Bot Username: @{me.username}"))
+        print(small_caps(f"📊 Bot Username: @{BOT_USERNAME}"))
         print(small_caps(f"🤖 Bot Name: {me.first_name}"))
         print(small_caps(f"📁 Database: {DB_NAME}"))
         print(small_caps(f"👤 Admin ID(s): {', '.join(str(a) for a in ADMIN_IDS)}"))
