@@ -1,7 +1,8 @@
 def register(app, fsub):
+    import stick as _stick_module
     from stick import (
         small_caps, reply_or_dm, vid_sessions, TEMP_DIR, DEFAULT_EMOJI,
-        BOT_USERNAME, get_user_packs, get_pack_by_index, get_user_pack,
+        get_user_packs, get_pack_by_index, get_user_pack,
         get_next_pack_index, create_pack_record, create_unique_video_sticker_pack,
         add_video_sticker_to_pack, increment_pack_sticker_count,
         increment_sticker_count, generate_vid_preview, upload_to_catbox,
@@ -13,6 +14,9 @@ def register(app, fsub):
     from io import BytesIO
     from pyrogram import Client, filters, StopPropagation
     from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+
+    if _stick_module.BOT_USERNAME:
+        _stick_module.BOT_USERNAME = _stick_module.BOT_USERNAME.lower()
 
     # ==============================================
     # COMMAND: /vid

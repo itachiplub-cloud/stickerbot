@@ -11,10 +11,14 @@ def register(app, fsub):
         DURATION_TOLERANCE, register_user_command, CATEGORY_STICKER,
         generate_telegram_pack_name, validate_telegram_pack_name
     )
+    import stick as _stick_module
     import os, uuid, time
     from io import BytesIO
     from pyrogram import Client, filters, StopPropagation
     from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+
+    if _stick_module.BOT_USERNAME:
+        _stick_module.BOT_USERNAME = _stick_module.BOT_USERNAME.lower()
 
     _cached_bot_username = None
 
@@ -25,7 +29,7 @@ def register(app, fsub):
             _cached_bot_username = me.username
         if not _cached_bot_username:
             raise RuntimeError("Bot username is not set")
-        return _cached_bot_username
+        return _cached_bot_username.lower()
 
     # ==============================================
     # COMMAND: /plain
