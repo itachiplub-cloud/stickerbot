@@ -1,7 +1,7 @@
 def register(app, fsub):
     from stick import (
         small_caps, reply_or_dm, plain_sessions, TEMP_DIR, DEFAULT_EMOJI,
-        BOT_USERNAME, get_user_packs, get_pack_by_index, get_user_pack,
+        get_user_packs, get_pack_by_index, get_user_pack,
         get_next_pack_index, create_pack_record, create_unique_sticker_pack,
         create_unique_video_sticker_pack, add_sticker_to_pack,
         add_video_sticker_to_pack, increment_pack_sticker_count,
@@ -15,6 +15,17 @@ def register(app, fsub):
     from io import BytesIO
     from pyrogram import Client, filters, StopPropagation
     from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+
+    _cached_bot_username = None
+
+    async def _get_bot_username(client):
+        nonlocal _cached_bot_username
+        if _cached_bot_username is None:
+            me = await client.get_me()
+            _cached_bot_username = me.username
+        if not _cached_bot_username:
+            raise RuntimeError("Bot username is not set")
+        return _cached_bot_username
 
     # ==============================================
     # COMMAND: /plain
@@ -532,12 +543,13 @@ def register(app, fsub):
 
                 if not telegram_pack_name:
                     pack_type = "static"
-                    test_name = generate_telegram_pack_name(display_title, BOT_USERNAME)
+                    bot_username = await _get_bot_username(client)
+                    test_name = generate_telegram_pack_name(display_title, bot_username)
                     if validate_telegram_pack_name(test_name):
                         final_title = display_title
                     else:
                         print(f"[PACK NAME] Original: {display_title}")
-                        print(f"[PACK NAME] Bot Username: {BOT_USERNAME}")
+                        print(f"[PACK NAME] Bot Username: {bot_username}")
                         print(f"[PACK NAME] Generated: {test_name}")
                         print(f"[PACK NAME] Invalid - using safe fallback")
                         final_title = "Sticker Pack"
@@ -571,12 +583,13 @@ def register(app, fsub):
 
                 if not telegram_pack_name:
                     pack_type = "video"
-                    test_name = generate_telegram_pack_name(display_title, BOT_USERNAME)
+                    bot_username = await _get_bot_username(client)
+                    test_name = generate_telegram_pack_name(display_title, bot_username)
                     if validate_telegram_pack_name(test_name):
                         final_title = display_title
                     else:
                         print(f"[PACK NAME] Original: {display_title}")
-                        print(f"[PACK NAME] Bot Username: {BOT_USERNAME}")
+                        print(f"[PACK NAME] Bot Username: {bot_username}")
                         print(f"[PACK NAME] Generated: {test_name}")
                         print(f"[PACK NAME] Invalid - using safe fallback")
                         final_title = "Sticker Pack"

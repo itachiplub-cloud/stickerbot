@@ -307,14 +307,16 @@ def register(app, fsub):
             mention = f"[{from_user.first_name}](tg://user?id={from_user.id})"
             caption = f"{mention}\n\n{caption}"
 
-        kb = InlineKeyboardMarkup([
+        rows = [
             [InlineKeyboardButton("✅ Save To Pack", callback_data="vidpreview_save"),
              InlineKeyboardButton("🔄 Replace Video", callback_data="vidpreview_replace")],
             [InlineKeyboardButton("✏ Edit Text", callback_data="vidpreview_edit"),
              InlineKeyboardButton("🗑 Remove Text", callback_data="vidpreview_removetext")],
-            [InlineKeyboardButton("👀 Watch Preview", url=catbox_url)],
-            [InlineKeyboardButton("❌ Cancel", callback_data="vidflow_cancel")]
-        ])
+        ]
+        if catbox_url:
+            rows.append([InlineKeyboardButton("👀 Watch Preview", url=catbox_url)])
+        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="vidflow_cancel")])
+        kb = InlineKeyboardMarkup(rows)
 
         sent_msg = await client.send_video(chat_id=chat_id, video=output_preview, caption=caption, reply_markup=kb)
         session["preview_message"] = sent_msg
