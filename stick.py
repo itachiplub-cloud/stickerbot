@@ -231,6 +231,8 @@ def generate_telegram_pack_name(display_title, bot_username):
         base = "pack"
     if base[0].isdigit():
         base = f"p_{base}"
+    if not bot_username:
+        raise RuntimeError("BOT_USERNAME not initialized")
     bot_username = bot_username.lower()
     suffix = f"_by_{bot_username}"
     max_base_len = 64 - len(suffix)
@@ -2104,32 +2106,31 @@ register_admin_command("adminhelp", "View all available admin commands.")
 # ==============================================
 # INITIALIZE AND RUN BOT
 # ==============================================
-def main():
+async def main():
     global BOT_USERNAME
     print(small_caps("🚀 Starting Sticker Bot..."))
 
-    with app:
-        me = app.get_me()
-        if not me or not me.username:
-            print("❌ Bot username is not set. Please set a username for your bot via @BotFather and restart.")
-            sys.exit(1)
-        BOT_USERNAME = me.username.lower()
+    me = await app.get_me()
+    if not me or not me.username:
+        raise RuntimeError("Bot username could not be loaded.")
+    BOT_USERNAME = me.username.lower()
 
-        print(small_caps(f"📊 Bot Username: @{BOT_USERNAME}"))
-        print(small_caps(f"🤖 Bot Name: {me.first_name}"))
-        print(small_caps(f"📁 Database: {DB_NAME}"))
-        print(small_caps(f"👤 Admin ID(s): {', '.join(str(a) for a in ADMIN_IDS)}"))
-        print(small_caps("✅ Bot is ready!"))
+    print(small_caps(f"📊 Bot Username: @{BOT_USERNAME}"))
+    print(f"[BOT] Username Loaded: {BOT_USERNAME}")
+    print(small_caps(f"🤖 Bot Name: {me.first_name}"))
+    print(small_caps(f"📁 Database: {DB_NAME}"))
+    print(small_caps(f"👤 Admin ID(s): {', '.join(str(a) for a in ADMIN_IDS)}"))
+    print(small_caps("✅ Bot is ready!"))
 
-        users_collection.create_index("user_id", unique=True)
-        users_collection.create_index("last_active")
-        packs_collection.create_index([("user_id", 1), ("pack_index", 1)], unique=True)
+    users_collection.create_index("user_id", unique=True)
+    users_collection.create_index("last_active")
+    packs_collection.create_index([("user_id", 1), ("pack_index", 1)], unique=True)
 
-        # Register /plain and /vid handlers
-        plain_handler.register(app, fsub)
-        vid_handler.register(app, fsub)
+    # Register /plain and /vid handlers
+    plain_handler.register(app, fsub)
+    vid_handler.register(app, fsub)
 
-        idle()
+    await idle()
 
 if __name__ == "__main__":
-    main()
+    app.run(main())
