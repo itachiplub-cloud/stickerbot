@@ -225,6 +225,7 @@ def generate_telegram_pack_name(display_title, bot_username):
     base = display_title.strip().lower()
     base = re.sub(r'\s+', '_', base)
     base = re.sub(r'[^a-z0-9_]', '', base)
+    base = re.sub(r'_+', '_', base)
     base = base.strip('_')
     if not base:
         base = "pack"
@@ -236,6 +237,13 @@ def generate_telegram_pack_name(display_title, bot_username):
         max_base_len = 20
     base = base[:max_base_len]
     return f"{base}{suffix}"
+
+def validate_telegram_pack_name(name):
+    if not name or len(name) > 64:
+        return False
+    if not re.match(r'^[a-z0-9_]+$', name):
+        return False
+    return True
 
 def delete_pack_record(user_id, pack_index):
     packs_collection.delete_one({"user_id": str(user_id), "pack_index": pack_index})
@@ -573,6 +581,7 @@ def extract_pack_short_name(raw):
 # VIDEO STICKER & CATBOX HELPERS
 # ==============================================
 CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php"
+YUKI_UPLOAD_URL = "https://yukiapi.site/upload"
 MAX_PREVIEW_SECONDS = 3.0
 DURATION_TOLERANCE = 0.05
 
@@ -714,7 +723,36 @@ async def generate_vid_preview(input_path, output_path, text=None):
     except Exception as e:
         return False, str(e)
 
+async def upload_to_yuki(file_path):
+    for attempt in range(1, 4):
+        try:
+            with open(file_path, "rb") as f:
+                file_bytes = f.read()
+            form = aiohttp.FormData()
+            form.add_field("file", file_bytes, filename=os.path.basename(file_path))
+            async with aiohttp.ClientSession() as session:
+                async with session.post(YUKI_UPLOAD_URL, data=form, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status >= 500:
+                        if attempt < 3:
+                            await asyncio.sleep(attempt)
+                        continue
+                    result_text = (await resp.text()).strip()
+            if result_text and result_text.startswith("http"):
+                return result_text
+        except (asyncio.TimeoutError, aiohttp.ClientError, OSError):
+            if attempt < 3:
+                await asyncio.sleep(attempt)
+            continue
+    return None
+
 async def upload_to_catbox(file_path):
+    yuki_url = await upload_to_yuki(file_path)
+    if yuki_url:
+        print("[YUKI] Upload to Yuki successful")
+        return yuki_url
+
+    print("[YUKI] Yuki upload failed -> falling back to Catbox")
+
     with open(file_path, "rb") as f:
         file_bytes = f.read()
 
@@ -727,7 +765,9 @@ async def upload_to_catbox(file_path):
             result_text = (await resp.text()).strip()
 
     if not result_text.startswith("http"):
-        raise Exception(result_text or "Unknown Catbox error")
+        print("[CATBOX] Catbox upload failed")
+        return None
+    print("[CATBOX] Catbox upload successful")
     return result_text
 
 def prepare_plain_image_sticker(image_bytes):

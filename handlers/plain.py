@@ -8,7 +8,8 @@ def register(app, fsub):
         increment_sticker_count, normalize_video_sticker, cleanup_temp_files,
         probe_video_duration, prepare_plain_image_sticker, convert_webp_to_png,
         normalize_sticker_png, cancel_user_session, MAX_PREVIEW_SECONDS,
-        DURATION_TOLERANCE, register_user_command, CATEGORY_STICKER
+        DURATION_TOLERANCE, register_user_command, CATEGORY_STICKER,
+        generate_telegram_pack_name, validate_telegram_pack_name
     )
     import os, uuid, time
     from io import BytesIO
@@ -531,8 +532,17 @@ def register(app, fsub):
 
                 if not telegram_pack_name:
                     pack_type = "static"
+                    test_name = generate_telegram_pack_name(display_title, BOT_USERNAME)
+                    if validate_telegram_pack_name(test_name):
+                        final_title = display_title
+                    else:
+                        print(f"[PACK NAME] Original: {display_title}")
+                        print(f"[PACK NAME] Bot Username: {BOT_USERNAME}")
+                        print(f"[PACK NAME] Generated: {test_name}")
+                        print(f"[PACK NAME] Invalid - using safe fallback")
+                        final_title = "Sticker Pack"
                     await proc.edit_text(small_caps("⚙️ Creating Pack..."))
-                    success, result, telegram_pack_name_new = await create_unique_sticker_pack(client, uid, display_title, sticker_bytes, emoji)
+                    success, result, telegram_pack_name_new = await create_unique_sticker_pack(client, uid, final_title, sticker_bytes, emoji)
                     if not success:
                         cleanup_temp_files(session.get("media_path"))
                         plain_sessions.pop(uid, None)
@@ -561,10 +571,19 @@ def register(app, fsub):
 
                 if not telegram_pack_name:
                     pack_type = "video"
+                    test_name = generate_telegram_pack_name(display_title, BOT_USERNAME)
+                    if validate_telegram_pack_name(test_name):
+                        final_title = display_title
+                    else:
+                        print(f"[PACK NAME] Original: {display_title}")
+                        print(f"[PACK NAME] Bot Username: {BOT_USERNAME}")
+                        print(f"[PACK NAME] Generated: {test_name}")
+                        print(f"[PACK NAME] Invalid - using safe fallback")
+                        final_title = "Sticker Pack"
                     await proc.edit_text(small_caps("⚙️ Creating Pack..."))
                     with open(media_path, "rb") as f:
                         video_bytes = f.read()
-                    success, result, telegram_pack_name_new = await create_unique_video_sticker_pack(client, uid, display_title, video_bytes, emoji)
+                    success, result, telegram_pack_name_new = await create_unique_video_sticker_pack(client, uid, final_title, video_bytes, emoji)
                     if not success:
                         cleanup_temp_files(media_path)
                         plain_sessions.pop(uid, None)
