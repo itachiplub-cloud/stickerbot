@@ -231,6 +231,7 @@ def generate_telegram_pack_name(display_title, bot_username):
         base = "pack"
     if base[0].isdigit():
         base = f"p_{base}"
+    bot_username = bot_username.lower()
     suffix = f"_by_{bot_username}"
     max_base_len = 64 - len(suffix)
     if max_base_len < 1:
@@ -384,6 +385,7 @@ async def _bot_api_upload(method, form_fields, file_field_name, file_bytes, file
     async with aiohttp.ClientSession() as session:
         async with session.post(url, data=form) as resp:
             result = await resp.json()
+    print(f"[TELEGRAM API] Method: {method} | OK: {result.get('ok')} | Description: {result.get('description', 'N/A')}")
     if not result.get("ok"):
         raise Exception(result.get("description", "Unknown Telegram Bot API error"))
     return result.get("result")
@@ -397,6 +399,12 @@ async def create_sticker_pack(client, user_id, pack_name, title, sticker_bytes, 
         if max_title_len < 1:
             max_title_len = 30
         visible_title = f"{title[:max_title_len]}{username_suffix}"
+
+        print(f"[CREATE PACK] Original Title: {title}")
+        print(f"[CREATE PACK] Bot Username: {BOT_USERNAME}")
+        print(f"[CREATE PACK] Final Sticker Set Name: {pack_name}")
+        print(f"[CREATE PACK] Length: {len(pack_name)}")
+        print(f"[CREATE PACK] Regex Valid: {bool(re.match(r'^[a-z0-9_]+$', pack_name))}")
 
         stickers_payload = json.dumps([{
             "sticker": "attach://sticker_file",
@@ -449,6 +457,12 @@ async def create_video_sticker_pack(client, user_id, pack_name, title, sticker_b
         if max_title_len < 1:
             max_title_len = 30
         visible_title = f"{title[:max_title_len]}{username_suffix}"
+
+        print(f"[CREATE VIDEO PACK] Original Title: {title}")
+        print(f"[CREATE VIDEO PACK] Bot Username: {BOT_USERNAME}")
+        print(f"[CREATE VIDEO PACK] Final Sticker Set Name: {pack_name}")
+        print(f"[CREATE VIDEO PACK] Length: {len(pack_name)}")
+        print(f"[CREATE VIDEO PACK] Regex Valid: {bool(re.match(r'^[a-z0-9_]+$', pack_name))}")
 
         stickers_payload = json.dumps([{
             "sticker": "attach://sticker_file",
