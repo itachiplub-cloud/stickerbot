@@ -396,7 +396,7 @@ async def create_sticker_pack(client, user_id, pack_name, title, sticker_bytes, 
     try:
         normalized_bytes = normalize_sticker_png(sticker_bytes)
 
-        username_suffix = f" • @{BOT_USERNAME}"
+        username_suffix = f" | @{BOT_USERNAME}"
         max_title_len = 64 - len(username_suffix)
         if max_title_len < 1:
             max_title_len = 30
@@ -454,7 +454,7 @@ async def add_sticker_to_pack(client, user_id, pack_name, sticker_bytes, emoji):
 
 async def create_video_sticker_pack(client, user_id, pack_name, title, sticker_bytes, emoji):
     try:
-        username_suffix = f" • @{BOT_USERNAME}"
+        username_suffix = f" | @{BOT_USERNAME}"
         max_title_len = 64 - len(username_suffix)
         if max_title_len < 1:
             max_title_len = 30
