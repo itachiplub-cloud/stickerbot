@@ -7,6 +7,7 @@ import json
 import uuid
 import asyncio
 import aiohttp
+import shutil
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters, idle, StopPropagation
@@ -106,6 +107,56 @@ app = Client(
 )
 
 BOT_USERNAME = None
+
+# ==============================================
+# FFMPEG AUTO-DETECTION
+# ==============================================
+_BIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+
+def _resolve_binary(name):
+    local = os.path.join(_BIN_DIR, name)
+    if os.path.isfile(local) and os.access(local, os.X_OK):
+        return os.path.normpath(local)
+    system = shutil.which(name)
+    if system:
+        return os.path.normpath(system)
+    return None
+
+FFMPEG_PATH = _resolve_binary("ffmpeg")
+FFPROBE_PATH = _resolve_binary("ffprobe")
+
+if not FFMPEG_PATH or not FFPROBE_PATH:
+    missing = []
+    if not FFMPEG_PATH:
+        missing.append("ffmpeg")
+    if not FFPROBE_PATH:
+        missing.append("ffprobe")
+    print("=" * 60)
+    print("  FFMPEG / FFPROBE NOT FOUND")
+    print("=" * 60)
+    print(f"  Missing: {', '.join(missing)}")
+    print()
+    print("  This bot requires FFmpeg to create video stickers.")
+    print()
+    print("  Install options:")
+    print("    • Ubuntu/Debian:  sudo apt install ffmpeg")
+    print("    • macOS:          brew install ffmpeg")
+    print("    • Windows:        Download from https://ffmpeg.org/download.html")
+    print("                        and add to PATH, or place ffmpeg.exe/ffprobe.exe")
+    print(f"                        in: {_BIN_DIR}")
+    print("    • Docker:         Already included in the Docker image")
+    print()
+    print("  You can also place static binaries in the 'bin/' directory:")
+    print(f"    {_BIN_DIR}/ffmpeg")
+    print(f"    {_BIN_DIR}/ffprobe")
+    print("=" * 60)
+    sys.exit(1)
+
+print("━━━━━━━━━━━━━━━━━━━━━━")
+print("FFmpeg Check")
+print(f"✓ ffmpeg : {FFMPEG_PATH}")
+print(f"✓ ffprobe: {FFPROBE_PATH}")
+print("━━━━━━━━━━━━━━━━━━━━━━")
 
 # ==============================================
 # FORCE-SUBSCRIBE SYSTEM
@@ -612,7 +663,7 @@ def cleanup_temp_files(*paths):
 async def probe_video_duration(path):
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return None
-    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", path]
+    cmd = [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration", "-of", "json", path]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -639,7 +690,7 @@ def _escape_ffmpeg_text(text):
 async def normalize_video_sticker(input_path, output_path):
     vf = "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=black"
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG_PATH, "-y",
         "-i", input_path,
         "-t", str(MAX_PREVIEW_SECONDS),
         "-vf", vf,
@@ -666,7 +717,7 @@ async def normalize_video_sticker(input_path, output_path):
         file_size = os.path.getsize(output_path)
         if file_size > 256 * 1024:
             cmd_retry = [
-                "ffmpeg", "-y",
+                FFMPEG_PATH, "-y",
                 "-i", input_path,
                 "-t", str(MAX_PREVIEW_SECONDS),
                 "-vf", vf,
@@ -708,7 +759,7 @@ async def generate_vid_preview(input_path, output_path, text=None):
     vf = ",".join(vf_parts)
 
     cmd = [
-        "ffmpeg", "-y",
+        FFMPEG_PATH, "-y",
         "-i", input_path,
         "-t", str(MAX_PREVIEW_SECONDS),
         "-vf", vf,
